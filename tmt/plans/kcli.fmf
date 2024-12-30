@@ -8,11 +8,10 @@ provision:
     virtualization:
       is-virtualized: false
       is-supported: true
+    cpu:
+      processors: ">= 8"
+    memory: ">= 16 GB"
 prepare:
-  - name: Install dependencies
-    how: install
-    package:
-      - git
   - name: Prepare system to deploy Kubernetes cluster
     how: ansible
     playbook: tmt/ansible/prepare.yaml

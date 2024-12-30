@@ -1,5 +1,5 @@
 ---
-- name: Create k8s cluster
+- name: Deploy k8s cluster for testing
   hosts: all
   tasks:
     - name: Ensure /home/kcli directory exists
@@ -19,45 +19,52 @@
               <path>/home/kcli</path>
             </target>
           </pool>
-    
+
     - name: Start the default storage pool
       community.libvirt.virt_pool:
         command: start
         name: default
 
+    - name: Create ssh-key
+      ansible.builtin.user:
+        name: "{{ ansible_user_id }}"
+        generate_ssh_key: yes
+        password: kubesan
+
     - name: Create a k8s cluster
-      karmab.kcli.kcli_cluster:
-        state: present
-        name: test
-        type: generic
-        parameters:
-          ctlplanes: 1
-          workers: 1
-          domain: kubesan.corp
-          memory: 8192
-          image: fedora41
+      ansible.builtin.command:
+        cmd: kcli create cluster generic test --param ctlplanes=1 --param workers=1 --param domain=kubesan.corp --param memory=8192 --param image=fedora41 --param cmds=['dnf -y install python3-libdnf5']
 
     - name: Copy kubeconfig
       ansible.builtin.copy:
         src: ~/.kcli/clusters/test/auth/kubeconfig
         dest: ~/.kube/config
+        remote_src: true
 
+    # hardcode here, format: <cluster_name>-worker-<index>
     - name: Get info from worker
-      karmab.kcli.kcli_info:
-        name: test-worker-0 # hardcode here, format: <cluster_name>-worker-<index>
+      ansible.builtin.command: kcli info vm test-worker-0 -o json
       register: worker_info
 
+    - name: Format worker info
+      ansible.builtin.set_fact:
+        worker_info: "{{ worker_info.stdout | from_json }}"
+
     - name: Allow password login for worker
-      ansible.builtin.command: kcli ssh test-worker-0 'echo "{{ worker_info.meta.user }}:redhat" | sudo chpasswd'
+      ansible.builtin.command: kcli ssh {{ worker_info.name }} 'echo "{{ worker_info.user }}:kubesan" | sudo chpasswd'
+
+    - name: Wait for nodes to be ready
+      ansible.builtin.command:
+        cmd: kubectl wait --for=condition=Ready nodes --all --timeout=5m
 
     - name: Add worker node to worker_nodes group
       ansible.builtin.add_host:
-        name: "{{ worker_info.meta.name }}"
-        ansible_host: "{{ worker_info.meta.ip }}"
-        ansible_user: "{{ worker_info.meta.user }}"
-        ansible_ssh_pass: redhat
+        name: "{{ worker_info.name }}"
+        ansible_host: "{{ worker_info.ip }}"
+        ansible_user: "{{ worker_info.user }}"
+        ansible_ssh_pass: kubesan
         groups: worker_nodes
-        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -J {{ ansible_user_id }}@{{ ansible_host }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o ProxyCommand='ssh -i /etc/citool.d/id_rsa_artemis -W %h:%p {{ inventory_hostname }}'"
 
 - name: Prepare worker nodes
   hosts: worker_nodes
@@ -84,7 +91,7 @@
     - name: Restart systemd-modules-load service
       ansible.builtin.systemd:
         name: systemd-modules-load.service
-        enabled: yes
+        enabled: true
         state: restarted
 
     - name: Enable LVM lock daemon in lvm.conf
@@ -147,18 +154,18 @@
 
     - name: Reload systemd to pick up new service
       ansible.builtin.systemd:
-        daemon_reload: yes
+        daemon_reload: true
 
     - name: Enable and start nbd-client service
       ansible.builtin.systemd:
         name: nbd-client
-        enabled: yes
+        enabled: true
         state: started
 
     - name: Enable and start sanlock and lvmlockd services
       ansible.builtin.systemd:
         name: "{{ item }}"
-        enabled: yes
+        enabled: true
         state: restarted
       loop:
         - sanlock
@@ -177,5 +184,5 @@
     - name: Enable and start vg-lock service
       ansible.builtin.systemd:
         name: vg-lock
-        enabled: yes
+        enabled: true
         state: started
