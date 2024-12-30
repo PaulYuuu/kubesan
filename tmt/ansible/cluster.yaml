@@ -1,0 +1,181 @@
+---
+- name: Create k8s cluster
+  hosts: all
+  tasks:
+    - name: Ensure /home/kcli directory exists
+      ansible.builtin.file:
+        path: /home/kcli
+        state: directory
+        mode: '0755'
+
+    - name: Create the default storage pool
+      community.libvirt.virt_pool:
+        command: define
+        name: default
+        xml: |
+          <pool type='dir'>
+            <name>default</name>
+            <target>
+              <path>/home/kcli</path>
+            </target>
+          </pool>
+    
+    - name: Start the default storage pool
+      community.libvirt.virt_pool:
+        command: start
+        name: default
+
+    - name: Create a k8s cluster
+      karmab.kcli.kcli_cluster:
+        state: present
+        name: test
+        type: generic
+        parameters:
+          ctlplanes: 1
+          workers: 1
+          domain: kubesan.corp
+          memory: 8192
+          image: fedora41
+
+    - name: Copy kubeconfig
+      ansible.builtin.copy:
+        src: ~/.kcli/clusters/test/auth/kubeconfig
+        dest: ~/.kube/config
+
+    - name: Get info from worker
+      karmab.kcli.kcli_info:
+        name: test-worker-0 # hardcode here, format: <cluster_name>-worker-<index>
+      register: worker_info
+
+    - name: Allow password login for worker
+      ansible.builtin.command: kcli ssh test-worker-0 'echo "{{ worker_info.meta.user }}:redhat" | sudo chpasswd'
+
+    - name: Add worker node to worker_nodes group
+      ansible.builtin.add_host:
+        name: "{{ worker_info.meta.name }}"
+        ansible_host: "{{ worker_info.meta.ip }}"
+        ansible_user: "{{ worker_info.meta.user }}"
+        ansible_ssh_pass: redhat
+        groups: worker_nodes
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -J {{ ansible_user_id }}@{{ ansible_host }}"
+
+- name: Prepare worker nodes
+  hosts: worker_nodes
+  become: true
+  tasks:
+    - name: Install required package
+      ansible.builtin.package:
+        name:
+          - lvm2-lockd
+          - nbd
+          - sanlock
+        state: present
+
+    - name: Create module file to load required modules
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/kubesan.conf
+        content: |
+          nbd
+          dm-thin-pool
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Restart systemd-modules-load service
+      ansible.builtin.systemd:
+        name: systemd-modules-load.service
+        enabled: yes
+        state: restarted
+
+    - name: Enable LVM lock daemon in lvm.conf
+      ansible.builtin.replace:
+        path: /etc/lvm/lvm.conf
+        regexp: '# use_lvmlockd = 0'
+        replace: 'use_lvmlockd = 1'
+
+    - name: Update host_id in /etc/lvm/lvmlocal.conf
+      ansible.builtin.replace:
+        path: /etc/lvm/lvmlocal.conf
+        regexp: '# host_id = 0'
+        replace: "host_id = {{ ansible_host.split('.')[-1] }}"
+
+    - name: Update use_watchdog in /etc/sanlock/sanlock.conf
+      ansible.builtin.replace:
+        path: /etc/sanlock/sanlock.conf
+        regexp: '# use_watchdog = 1'
+        replace: 'use_watchdog = 0'
+
+    - name: Create nbd-client service file
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/nbd-client.service
+        content: |
+          [Unit]
+          Description=NBD client
+          After=network.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=nbd-client {{ ansible_default_ipv4.gateway }} 10909 /dev/nbd0
+          ExecStop=nbd-client -d /dev/nbd0
+          RemainAfterExit=true
+          Restart=on-failure
+          RestartSec=2
+          User=root
+          TimeoutSec=600
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Create vg-lock service file
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/vg-lock.service
+        content: |
+          [Unit]
+          Description=KubeSAN LVM Lock Service
+          After=sanlock.service lvmlockd.service nbd-client.service
+          Requires=sanlock.service lvmlockd.service nbd-client.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=vgchange --devicesfile kubesan-vg --lock-start
+          RemainAfterExit=yes
+          StandardOutput=journal
+
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Reload systemd to pick up new service
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Enable and start nbd-client service
+      ansible.builtin.systemd:
+        name: nbd-client
+        enabled: yes
+        state: started
+
+    - name: Enable and start sanlock and lvmlockd services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: yes
+        state: restarted
+      loop:
+        - sanlock
+        - lvmlockd
+
+    - name: Create a shared volume group
+      ansible.builtin.command: vgcreate --shared kubesan-vg /dev/nbd0
+      when: ansible_hostname == groups['worker_nodes'][0]
+
+    - name: Add SAN LUN to LVM
+      ansible.builtin.command: lvmdevices --devicesfile kubesan-vg --adddev /dev/nbd0
+
+    - name: check if sanlock and lvmlockd are configured correctly
+      ansible.builtin.command: vgchange --devicesfile kubesan-vg --lock-start
+
+    - name: Enable and start vg-lock service
+      ansible.builtin.systemd:
+        name: vg-lock
+        enabled: yes
+        state: started

@@ -1,0 +1,8 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+apply:
+  - ../resources/linear-pvc.yaml
+  - ../resources/thin-pvc.yaml
+assert:
+  - ../resources/linear-assert.yaml
+  - ../resources/thin-assert.yaml

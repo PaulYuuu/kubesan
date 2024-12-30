@@ -1,0 +1,23 @@
+summary: TMT plan for KubeSAN kcli test
+discover:
+  how: fmf
+provision:
+  how: artemis
+  arch: x86_64
+  hardware:
+    virtualization:
+      is-virtualized: false
+      is-supported: true
+prepare:
+  - name: Install dependencies
+    how: install
+    package:
+      - git
+  - name: Prepare system to deploy Kubernetes cluster
+    how: ansible
+    playbook: tmt/ansible/prepare.yaml
+  - name: Deploy Kubernetes cluster for testing
+    how: ansible
+    playbook: tmt/ansible/cluster.yaml
+execute:
+  how: tmt

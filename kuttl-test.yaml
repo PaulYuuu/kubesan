@@ -1,0 +1,9 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestSuite
+startKIND: false
+timeout: 120
+manifestDirs:
+  - tests/manifests
+testDirs:
+  - tests/kuttl
+command: kubectl apply -k deploy/kubernetes

@@ -1,0 +1,7 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: linear-pvc-blk-rox
+status:
+  phase: Bound

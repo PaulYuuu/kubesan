@@ -1,0 +1,77 @@
+---
+- name: Prepare test machine
+  hosts: all
+  tasks:
+    - name: Add Kubernetes repository
+      ansible.builtin.yum_repository:
+        name: kubernetes
+        description: Kubernetes
+        baseurl: https://pkgs.k8s.io/core:/stable:/v1.32/rpm/
+        enabled: yes
+        gpgcheck: yes
+        gpgkey: https://pkgs.k8s.io/core:/stable:/v1.32/rpm/repodata/repomd.xml.key
+
+    - name: Enable kcli repository
+      ansible.builtin.command: dnf -y copr enable karmab/kcli
+
+    - name: Stop firewalld
+      service:
+       name: firewalld
+       state: stopped
+
+    - name: Install required packages
+      ansible.builtin.package:
+        name:
+          - kcli
+          - kubectl
+          - libvirt
+          - qemu-kvm
+          - virt-install
+        state: present
+
+    - name: Start libvirt daemons
+      ansible.builtin.systemd_service:
+        name: '{{ item }}'
+        state: started
+      loop:
+        - virtqemud.service
+        - virtnetworkd.service
+        - virtstoraged.service
+
+    - name: Add the nbd module
+      community.general.modprobe:
+        name: nbd
+        state: present
+
+    - name: Create a raw image
+      ansible.builtin.command: qemu-img create -f raw /home/test.img 20G
+      args:
+        creates: /home/test.img
+
+    - name: Create qemu-nbd service file
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/qemu-nbd.service
+        content: |
+          [Unit]
+          Description=QEMU NBD Server
+          After=network.target
+
+          [Service]
+          ExecStart=qemu-nbd --cache=none --format=raw --persistent --shared=0 --bind=0.0.0.0 --port=10909 /home/test.img
+          Restart=always
+          User=root
+          TimeoutSec=600
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Reload systemd to pick up new service
+      ansible.builtin.systemd_service:
+        daemon_reload: yes
+
+    - name: Enable and start qemu-nbd service
+      ansible.builtin.systemd_service:
+        name: qemu-nbd
+        enabled: yes
+        state: started
